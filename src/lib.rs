@@ -2,6 +2,7 @@
 
 pub mod error_code;
 pub mod exception;
+pub mod fence;
 pub mod idt;
 pub mod int;
 pub mod msr;
