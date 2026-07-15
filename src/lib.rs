@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod cpu;
 pub mod error_code;
 pub mod exception;
 pub mod fence;
