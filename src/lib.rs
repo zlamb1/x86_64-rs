@@ -1,5 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod error_code;
+pub mod exception;
 pub mod idt;
 pub mod int;
 pub mod msr;
