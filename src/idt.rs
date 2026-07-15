@@ -5,6 +5,31 @@ use crate::{
     segment::{self, Selector},
 };
 
+#[cfg(not(feature = "std"))]
+#[repr(C, packed)]
+struct Idtr {
+    size: u16,
+    offset: u64,
+}
+
+#[cfg(not(feature = "std"))]
+impl Idtr {
+    fn from_idt<const N: usize>(idt: &Idt<N>) -> Self {
+        Self {
+            size: (N * 16 - 1) as u16,
+            offset: (&raw const *idt).addr() as u64,
+        }
+    }
+
+    unsafe fn load(&self) {
+        let addr = (&raw const *self).addr();
+
+        unsafe {
+            core::arch::asm!("lidt [{}]", in(reg) addr, options(nostack, preserves_flags));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Idt<const N: usize> {
     descriptors: [Descriptor; N],
@@ -24,6 +49,24 @@ impl<const N: usize> Idt<N> {
 
     pub const fn len() -> usize {
         N
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn load(&'static self) {
+        unsafe {
+            self.load_unsafe();
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The IDT must remain valid as long as its in use.
+    #[cfg(not(feature = "std"))]
+    pub unsafe fn load_unsafe(&self) {
+        let idtr = Idtr::from_idt(self);
+        unsafe {
+            idtr.load();
+        }
     }
 }
 
