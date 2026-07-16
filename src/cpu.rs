@@ -1,3 +1,5 @@
+use core::arch::asm;
+
 #[cfg(not(feature = "std"))]
 #[inline]
 /// Stops execution until the next interrupt.
@@ -5,7 +7,7 @@
 /// interrupts disabled as that can deadlock the CPU.
 pub fn idle() {
     unsafe {
-        core::arch::asm!("hlt", options(nostack, preserves_flags));
+        asm!("hlt", options(nostack, preserves_flags));
     }
 }
 
@@ -16,5 +18,12 @@ pub fn stop() -> ! {
     crate::int::disable();
     loop {
         idle();
+    }
+}
+
+#[inline]
+pub fn spin_hint() {
+    unsafe {
+        asm!("pause", options(nomem, nostack, preserves_flags));
     }
 }

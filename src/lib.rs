@@ -8,7 +8,6 @@ pub mod idt;
 pub mod int;
 pub mod msr;
 pub mod segment;
-pub mod spin;
 pub mod tss;
 
 #[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
