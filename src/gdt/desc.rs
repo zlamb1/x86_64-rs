@@ -1,9 +1,22 @@
 use crate::Dpl;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Either<L, R> {
     Left(L),
     Right(R),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Error {
+    /// An invalid mode for the segment descriptor.
+    /// Ex: A data segment cannot use [`Mode::Long`].
+    InvalidMode,
+    /// The provided slice did not contain enough entries for the
+    /// expected segment type (e.g. 1 entry for memory and 2 for system segments).
+    Incomplete,
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
 
 pub enum Descriptor {
     Null,
@@ -12,12 +25,71 @@ pub enum Descriptor {
 }
 
 impl Descriptor {
+    const LIMIT_0_15_BIT: usize = 0;
+    const BASE_0_15_BIT: usize = 16;
+    const BASE_16_23_BIT: usize = 32;
+    const OPTIONS_0_15_BIT: usize = 40;
+    const BASE_24_31_BIT: usize = 56;
+
     /// Returns the raw bits of the underlying representation.
     pub const fn bits(&self) -> Either<u64, u128> {
         match self {
             Descriptor::Null => Either::Left(0),
             Descriptor::Memory(memory) => Either::Left(memory.bits()),
             Descriptor::System(system) => Either::Right(system.bits()),
+        }
+    }
+
+    /// Returns how many entries this descriptor occupies in the global descriptor table.
+    pub const fn entries(&self) -> usize {
+        match self {
+            Descriptor::Null | Descriptor::Memory(_) => 1,
+            Descriptor::System(_) => 2,
+        }
+    }
+}
+
+impl TryFrom<&[u64]> for Descriptor {
+    type Error = Error;
+
+    /// Try to parse a descriptor from a raw slice.
+    fn try_from(bits: &[u64]) -> Result<Self> {
+        let lo = *bits.get(0).ok_or(Error::Incomplete)?;
+        if lo == 0 {
+            return Ok(Descriptor::Null);
+        }
+
+        let options = Options::from_bits((lo >> Self::OPTIONS_0_15_BIT) as u16);
+
+        if options.is_system_segment() {
+            let hi = *bits.get(1).ok_or(Error::Incomplete)?;
+
+            Ok(Descriptor::System(System {
+                limit_0_15: (lo >> Self::LIMIT_0_15_BIT) as u16,
+                base_0_15: (lo >> Self::BASE_0_15_BIT) as u16,
+                base_16_23: (lo >> Self::BASE_16_23_BIT) as u8,
+                options,
+                base_24_31: (lo >> Self::BASE_24_31_BIT) as u8,
+                base_32_63: hi as u32,
+                _reserved: 0,
+            }))
+        } else {
+            if options.is_data_segment() {
+                match options.mode() {
+                    Mode::Long => {
+                        return Err(Error::InvalidMode);
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(Descriptor::Memory(Memory {
+                limit_0_15: (lo >> Self::LIMIT_0_15_BIT) as u16,
+                base_0_15: (lo >> Self::BASE_0_15_BIT) as u16,
+                base_16_23: (lo >> Self::BASE_16_23_BIT) as u8,
+                options,
+                base_24_31: (lo >> Self::BASE_24_31_BIT) as u8,
+            }))
         }
     }
 }
@@ -65,6 +137,13 @@ impl Options {
     const LONG_0_1: u8 = 0x20;
     const DB_0_1: u8 = 0x40;
     const GRANULARITY_0_1: u8 = 0x80;
+
+    const fn from_bits(bits: u16) -> Self {
+        Self {
+            access_0_7: bits as u8,
+            limit_16_19_flags_0_3: (bits >> 8) as u8,
+        }
+    }
 
     pub const fn memory() -> Self {
         Self {
@@ -150,6 +229,10 @@ impl Options {
         }
 
         self.access_0_7 &= !Self::EXECUTABLE_0_1;
+    }
+
+    pub const fn is_system_segment(&self) -> bool {
+        self.access_0_7 & Self::SYSTEM_0_1 == 0
     }
 
     pub const fn system_type(&self) -> SystemType {

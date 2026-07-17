@@ -48,7 +48,7 @@ impl Gdtr {
 #[repr(C)]
 pub struct Gdt<const N: usize> {
     entries: [u64; N],
-    next: usize,
+    len: usize,
 }
 
 impl<const N: usize> Gdt<N> {
@@ -61,43 +61,61 @@ impl<const N: usize> Gdt<N> {
 
         Self {
             entries: [0; _],
-            next: 1,
+            len: 1,
         }
     }
 
-    /// Returns the total capacity of the global descriptor table.
-    /// This includes the reserved null entry.
+    /// Returns the total capacity of the global descriptor table, including the reserved null entry.
     pub const fn capacity(&self) -> usize {
         N
     }
 
-    /// Returns the total entries in the global descriptor table.
-    /// This includes the reserved null entry.
+    /// Returns the total entries in the global descriptor table, including the reserved null entry.
     pub const fn len(&self) -> usize {
-        self.next
+        self.len
     }
 
-    /// Returns the raw entries, excluding the first null entry.
+    /// Returns the raw entries, excluding the reserved null entry.
+    ///
+    /// #### Note: This also yields null (zeroed) entries beyond [`Gdt::len`].
+    ///
     pub fn as_slice(&self) -> &[u64] {
         &self.entries[1..]
     }
 
-    /// Returns the raw mutable entries, excluding the first null entry.
-    pub fn as_slice_mut(&mut self) -> &mut [u64] {
+    /// Returns the raw mutable entries, excluding the reserved null entry.
+    ///
+    /// #### Note: This also yields null (zeroed) entries beyond [`Gdt::len`].
+    ///
+    pub fn as_mut_slice(&mut self) -> &mut [u64] {
         &mut self.entries[1..]
+    }
+
+    /// Returns the raw mutable entries. including the reserved null entry.
+    ///
+    /// #### Note: This also yields null (zeroed) entries beyond [`Gdt::len`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must take care to preserve the reserved null entry.
+    /// If the global descriptor table is loaded with a non-null first entry,
+    /// it can result in a #GP exception.
+    ///
+    pub unsafe fn as_mut_slice_unchecked(&mut self) -> &mut [u64] {
+        &mut self.entries
     }
 
     /// Appends a descriptor to the table.
     pub const fn append(&mut self, desc: desc::Descriptor) {
         match desc.bits() {
             desc::Either::Left(bits) => {
-                self.entries[self.next] = bits;
-                self.next += 1;
+                self.entries[self.len] = bits;
+                self.len += 1;
             }
             desc::Either::Right(bits) => {
-                self.entries[self.next] = bits as u64;
-                self.entries[self.next + 1] = (bits >> 64) as u64;
-                self.next += 2;
+                self.entries[self.len] = bits as u64;
+                self.entries[self.len + 1] = (bits >> 64) as u64;
+                self.len += 2;
             }
         }
     }
@@ -119,5 +137,41 @@ impl<const N: usize> Gdt<N> {
         unsafe {
             Gdtr::new(self).load();
         }
+    }
+
+    /// Returns an iterator over the entries, excluding the reserved null entry.
+    pub fn iter(&self) -> Iter<'_> {
+        Iter::new(self)
+    }
+}
+
+pub struct Iter<'a> {
+    entries: &'a [u64],
+    index: usize,
+}
+
+impl<'a> Iter<'a> {
+    pub fn new<const N: usize>(gdt: &'a Gdt<N>) -> Self {
+        Self {
+            entries: &gdt.entries[..gdt.len()],
+            index: 1,
+        }
+    }
+}
+
+impl Iterator for Iter<'_> {
+    type Item = desc::Result<desc::Descriptor>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.entries.len() {
+            let entries = &self.entries[self.index..];
+            let desc: desc::Result<desc::Descriptor> = entries.try_into();
+            match &desc {
+                Ok(desc) => self.index += desc.entries(),
+                Err(_) => self.index += 1,
+            }
+            return Some(desc);
+        }
+        None
     }
 }
