@@ -1,3 +1,5 @@
+use std::{cmp::min, ops::ControlFlow};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct Sp {
@@ -13,13 +15,149 @@ impl Sp {
         }
     }
 
+    /// Returns the virtual address of the stack pointer.
     pub const fn address(&self) -> u64 {
         self.lo as u64 | (self.hi as u64) << 32
     }
 
+    /// Sets the virtual address of the stack pointer.
     pub const fn set_address(&mut self, address: u64) {
         self.lo = address as u32;
         self.hi = (address >> 32) as u32;
+    }
+}
+
+#[derive(Debug)]
+pub struct PortRange<'a> {
+    bitmap: &'a mut [u8],
+    start: u32,
+    len: u32,
+}
+
+impl<'a> PortRange<'a> {
+    /// Constructs a port range from a I/O bitmap.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the end of the port range exceeds the I/O bitmap length.
+    ///
+    pub const fn new<const N: usize>(io_bitmap: &'a mut IoBitmap<N>, start: u32, len: u32) -> Self {
+        Self::new_with(&mut io_bitmap.bitmap, start, len)
+    }
+
+    /// Constructs a port range from a raw slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the end of the port range exceeds the slice length.
+    ///
+    pub const fn new_with(bitmap: &'a mut [u8], start: u32, len: u32) -> Self {
+        let end = start.checked_add(len).unwrap() as usize;
+        assert!(end <= bitmap.len() * 8);
+        Self { bitmap, start, len }
+    }
+
+    /// Returns the first port in the port range, assuming the length is non-zero.
+    pub const fn start(&self) -> u32 {
+        self.start
+    }
+
+    /// Returns the length of the port range.
+    pub const fn len(&self) -> u32 {
+        self.len
+    }
+
+    fn mask(bit: u8, len: u8) -> u8 {
+        ((1u8 << len) - 1) << bit
+    }
+
+    fn walk_bytes(
+        start: u32,
+        len: u32,
+        mut f: impl FnMut(usize, u8) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        let bit = (start % 8) as u8;
+        let mut byte = start as usize / 8;
+        let mut len = len;
+
+        if bit > 0 && len > 0 {
+            let partial_len = min(8 - bit as u32, len) as u8;
+            f(byte, Self::mask(bit, partial_len))?;
+            byte += 1;
+            len -= partial_len as u32;
+        }
+
+        while len >= 8 {
+            f(byte, 0xFF)?;
+            byte += 1;
+            len -= 8;
+        }
+
+        if len > 0 {
+            f(byte, Self::mask(0, len as u8))?;
+        }
+
+        ControlFlow::Continue(())
+    }
+
+    fn over(&mut self, f: impl Fn(&mut u8, u8)) {
+        let _ = Self::walk_bytes(self.start, self.len, |byte, mask| {
+            f(&mut self.bitmap[byte], mask);
+            ControlFlow::Continue(())
+        });
+    }
+
+    fn over_ref(&self, f: impl Fn(u8, u8) -> bool) -> bool {
+        Self::walk_bytes(self.start, self.len, |byte, mask| {
+            if !f(self.bitmap[byte], mask) {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        })
+        .is_continue()
+    }
+
+    /// Revokes access to all ports in the range.
+    pub fn revoke(&mut self) {
+        self.over(|byte, mask| *byte |= mask);
+    }
+
+    /// Returns true if all ports in the range are revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.over_ref(|byte, mask| byte & mask == mask)
+    }
+
+    /// Grants access to all ports in the range.
+    pub fn grant(&mut self) {
+        self.over(|byte, mask| *byte &= !mask);
+    }
+
+    /// Returns true if all ports in the range are granted.
+    pub fn is_granted(&self) -> bool {
+        self.over_ref(|byte, mask| byte & mask == 0)
+    }
+
+    /// Toggles access to all ports in the range.
+    pub fn toggle(&mut self) {
+        self.over(|byte, mask| *byte ^= mask);
+    }
+
+    /// Removes up to `n` ports from the front of the port range.
+    pub fn truncate_front(&mut self, n: u32) {
+        let truncate = min(n, self.len);
+        self.start += truncate;
+        self.len -= truncate;
+    }
+
+    /// Removes up to `n` ports from the back of the port range.
+    pub fn truncate_back(&mut self, n: u32) {
+        let truncate = min(n, self.len);
+        self.len -= truncate;
+    }
+
+    /// Returns true if the port range is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -31,9 +169,13 @@ pub struct IoBitmap<const N: usize> {
 }
 
 impl<const N: usize> IoBitmap<N> {
+    /// The max byte size for an I/O bitmap.
+    pub const MAX: usize = 8192;
+
+    /// Constructs an I/O bitmap that supports N * 8 ports.
     pub const fn new() -> Self {
         const {
-            assert!(N <= 8192, "I/O bitmap only supports 65536 ports.");
+            assert!(N <= Self::MAX, "I/O bitmap exceeds maximum size");
         }
 
         Self {
@@ -42,41 +184,39 @@ impl<const N: usize> IoBitmap<N> {
         }
     }
 
-    pub const fn port_enabled(&self, port: u16) -> bool {
-        assert!((port as usize) < N * 8);
-        let byte = port / 8;
-        let bit = port % 8;
-        self.bitmap[byte as usize] & 1u8 << bit == 0
+    /// Yields the full range of ports in this I/O bitmap.
+    pub const fn all(&mut self) -> PortRange<'_> {
+        PortRange::new(self, 0, N as u32 * 8)
     }
 
-    pub const fn port_enable(&mut self, port: u16) {
-        assert!((port as usize) < N * 8);
-        let byte = port / 8;
-        let bit = port % 8;
-        self.bitmap[byte as usize] &= !(1u8 << bit);
+    /// Yields a single port.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the port is out of bounds of the I/O bitmap.
+    ///
+    pub const fn port(&mut self, port: u16) -> PortRange<'_> {
+        PortRange::new(self, port as u32, 1)
     }
 
-    pub const fn port_enable_all(&mut self) {
-        let mut i = 0;
-        while i < N {
-            self.bitmap[i] = 0;
-            i += 1;
-        }
+    /// Yields a range of ports port..port + len.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the port range is out of bounds of the I/O bitmap.
+    ///
+    pub const fn ports(&mut self, port: u16, len: u16) -> PortRange<'_> {
+        PortRange::new(self, port as u32, len as u32)
     }
 
-    pub const fn port_disable(&mut self, port: u16) {
-        assert!((port as usize) < N * 8);
-        let byte = port / 8;
-        let bit = port % 8;
-        self.bitmap[byte as usize] |= 1u8 << bit;
-    }
-
-    pub const fn port_disable_all(&mut self) {
-        let mut i = 0;
-        while i < N {
-            self.bitmap[i] = 0xFF;
-            i += 1;
-        }
+    /// Yields a range of ports over the supplied `range`. If `range` is backwards, an empty [`PortRange`] is always returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the port range is out of bounds of the I/O bitmap.
+    ///
+    pub const fn range(&mut self, range: core::range::Range<u16>) -> PortRange<'_> {
+        self.ports(range.start, range.end.saturating_sub(range.start))
     }
 }
 
@@ -143,7 +283,7 @@ impl Tss {
 #[repr(C)]
 pub struct TssIoBitmap<const N: usize> {
     tss: Tss,
-    io_bitmap: IoBitmap<N>,
+    pub io_bitmap: IoBitmap<N>,
 }
 
 impl<const N: usize> TssIoBitmap<N> {
@@ -175,25 +315,5 @@ impl<const N: usize> TssIoBitmap<N> {
 
     pub const fn io_map_base(&self) -> u16 {
         self.tss.io_map_base()
-    }
-
-    pub const fn port_enabled(&self, port: u16) -> bool {
-        self.io_bitmap.port_enabled(port)
-    }
-
-    pub const fn port_enable(&mut self, port: u16) {
-        self.io_bitmap.port_enable(port);
-    }
-
-    pub const fn port_enable_all(&mut self) {
-        self.io_bitmap.port_enable_all();
-    }
-
-    pub const fn port_disable(&mut self, port: u16) {
-        self.io_bitmap.port_disable(port);
-    }
-
-    pub const fn port_disable_all(&mut self) {
-        self.io_bitmap.port_disable_all();
     }
 }
