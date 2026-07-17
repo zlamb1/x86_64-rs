@@ -1,4 +1,4 @@
-use std::{cmp::min, ops::ControlFlow};
+use core::{cmp::min, ops::ControlFlow};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
