@@ -155,8 +155,7 @@ impl Selector {
     }
 
     pub const fn with_rpl(mut self, rpl: Dpl) -> Self {
-        self.0 &= !0x3;
-        self.0 |= rpl as u16;
+        self.set_rpl(rpl);
         self
     }
 
@@ -176,8 +175,7 @@ impl Selector {
     }
 
     pub const fn with_table_index(mut self, table_index: TableIndex) -> Self {
-        self.0 &= !(0x1 << 2);
-        self.0 |= (table_index as u16) << 2;
+        self.set_table_index(table_index);
         self
     }
 
@@ -191,8 +189,7 @@ impl Selector {
     }
 
     pub const fn with_index(mut self, index: u16) -> Self {
-        self.0 &= !0x7;
-        self.0 |= index << 3;
+        self.set_index(index);
         self
     }
 

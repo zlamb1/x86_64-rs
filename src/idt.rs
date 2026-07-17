@@ -145,9 +145,7 @@ impl Descriptor {
     }
 
     pub const fn with_offset(mut self, offset: u64) -> Self {
-        self.offset_lo = offset as u16;
-        self.offset_mid = (offset >> 16) as u16;
-        self.offset_hi = (offset >> 32) as u32;
+        self.set_offset(offset);
         self
     }
 
@@ -181,8 +179,7 @@ impl Descriptor {
     }
 
     pub const fn with_gate_type(mut self, gate_type: Gate) -> Self {
-        self.options &= !(0xF << 8);
-        self.options |= (gate_type as u16) << 8;
+        self.set_gate_type(gate_type);
         self
     }
 
@@ -204,8 +201,7 @@ impl Descriptor {
     }
 
     pub const fn with_dpl(mut self, dpl: Dpl) -> Self {
-        self.options &= !(0x3 << 13);
-        self.options |= (dpl as u16) << 13;
+        self.set_dpl(dpl);
         self
     }
 
@@ -219,11 +215,7 @@ impl Descriptor {
     }
 
     pub const fn with_present(mut self, present: bool) -> Self {
-        if present {
-            self.options |= 0x1 << 15;
-        } else {
-            self.options &= !(0x1 << 15);
-        }
+        self.set_present(present);
         self
     }
 
