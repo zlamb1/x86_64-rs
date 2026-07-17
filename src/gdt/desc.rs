@@ -8,6 +8,7 @@ pub enum Either<L, R> {
 pub enum Descriptor {
     Null,
     Memory(Memory),
+    System(System),
 }
 
 impl Descriptor {
@@ -16,6 +17,7 @@ impl Descriptor {
         match self {
             Descriptor::Null => Either::Left(0),
             Descriptor::Memory(memory) => Either::Left(memory.bits()),
+            Descriptor::System(system) => Either::Right(system.bits()),
         }
     }
 }
@@ -44,20 +46,17 @@ pub enum Granularity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
-pub struct Memory {
-    limit_0_15: u16,
-    base_0_15: u16,
-    base_16_23: u8,
+struct Options {
     access_0_7: u8,
     limit_16_19_flags_0_3: u8,
-    base_24_31: u8,
 }
 
-impl Memory {
+impl Options {
     const ACCESSED_0_1: u8 = 0x1;
     const READABLE_0_1: u8 = 0x2;
     const CONFORMING_0_1: u8 = 0x4;
     const EXECUTABLE_0_1: u8 = 0x8;
+    const SYSTEM_TYPE_0_3: u8 = 0xF;
     const SYSTEM_0_1: u8 = 0x10;
     const DPL_0_2: u8 = 0x60;
     const DPL_0_2_BIT: u8 = 5;
@@ -67,14 +66,198 @@ impl Memory {
     const DB_0_1: u8 = 0x40;
     const GRANULARITY_0_1: u8 = 0x80;
 
+    pub const fn memory() -> Self {
+        Self {
+            access_0_7: Self::SYSTEM_0_1,
+            limit_16_19_flags_0_3: 0,
+        }
+    }
+
+    pub const fn system(system_type: SystemType) -> Self {
+        Self {
+            access_0_7: system_type as u8,
+            limit_16_19_flags_0_3: 0,
+        }
+    }
+
+    pub const fn bits(&self) -> u16 {
+        self.access_0_7 as u16 | (self.limit_16_19_flags_0_3 as u16) << 8
+    }
+
+    pub const fn limit_16_19(&self) -> u8 {
+        self.limit_16_19_flags_0_3 & Self::LIMIT_16_19
+    }
+
+    pub const fn set_limit_16_19(&mut self, limit_16_19: u8) {
+        self.limit_16_19_flags_0_3 &= !Self::LIMIT_16_19;
+        self.limit_16_19_flags_0_3 |= limit_16_19;
+    }
+
+    pub const fn was_accessed(&self) -> bool {
+        self.access_0_7 & Self::ACCESSED_0_1 != 0
+    }
+
+    pub const fn set_accessed(&mut self, accessed: bool) {
+        if accessed {
+            self.access_0_7 |= Self::ACCESSED_0_1;
+        } else {
+            self.access_0_7 &= !Self::ACCESSED_0_1;
+        }
+    }
+
+    pub const fn readable(&self) -> bool {
+        self.access_0_7 & Self::READABLE_0_1 != 0
+    }
+
+    pub const fn set_readable(&mut self, readable: bool) {
+        if readable {
+            self.access_0_7 |= Self::READABLE_0_1;
+        } else {
+            self.access_0_7 &= !Self::READABLE_0_1;
+        }
+    }
+
+    pub const fn conforming(&self) -> bool {
+        self.access_0_7 & Self::CONFORMING_0_1 != 0
+    }
+
+    pub const fn set_conforming(&mut self, conforming: bool) {
+        if conforming {
+            self.access_0_7 |= Self::CONFORMING_0_1;
+        } else {
+            self.access_0_7 &= !Self::CONFORMING_0_1;
+        }
+    }
+
+    pub const fn is_code_segment(&self) -> bool {
+        self.access_0_7 & Self::EXECUTABLE_0_1 != 0
+    }
+
+    pub const fn set_code_segment(&mut self) {
+        self.access_0_7 |= Self::EXECUTABLE_0_1;
+    }
+
+    pub const fn is_data_segment(&self) -> bool {
+        self.access_0_7 & Self::EXECUTABLE_0_1 == 0
+    }
+
+    pub const fn set_data_segment(&mut self) {
+        match self.mode() {
+            Mode::Long => {
+                panic!();
+            }
+            _ => {}
+        }
+
+        self.access_0_7 &= !Self::EXECUTABLE_0_1;
+    }
+
+    pub const fn system_type(&self) -> SystemType {
+        let system_type = self.access_0_7 & Self::SYSTEM_TYPE_0_3;
+        match system_type {
+            0x2 => SystemType::Ldt,
+            0x9 => SystemType::Tss,
+            0xB => SystemType::TssBusy,
+            _ => unreachable!(),
+        }
+    }
+
+    pub const fn set_system_type(&mut self, system_type: SystemType) {
+        self.access_0_7 &= !Self::SYSTEM_TYPE_0_3;
+        self.access_0_7 |= system_type as u8;
+    }
+
+    pub const fn dpl(&self) -> Dpl {
+        let dpl = (self.access_0_7 & Self::DPL_0_2) >> Self::DPL_0_2_BIT;
+
+        match dpl {
+            0 => Dpl::Ring0,
+            1 => Dpl::Ring1,
+            2 => Dpl::Ring2,
+            3 => Dpl::Ring3,
+            _ => unreachable!(),
+        }
+    }
+
+    pub const fn set_dpl(&mut self, dpl: Dpl) {
+        let dpl = dpl as u8;
+        self.access_0_7 &= !Self::DPL_0_2;
+        self.access_0_7 |= dpl << Self::DPL_0_2_BIT;
+    }
+
+    pub const fn present(&self) -> bool {
+        self.access_0_7 & Self::PRESENT_0_1 != 0
+    }
+
+    pub const fn set_present(&mut self, present: bool) {
+        if present {
+            self.access_0_7 |= Self::PRESENT_0_1;
+        } else {
+            self.access_0_7 &= !Self::PRESENT_0_1;
+        }
+    }
+
+    pub const fn mode(&self) -> Mode {
+        if self.limit_16_19_flags_0_3 & Self::LONG_0_1 != 0 {
+            Mode::Long
+        } else if self.limit_16_19_flags_0_3 & Self::DB_0_1 != 0 {
+            Mode::Prot32
+        } else {
+            Mode::Prot16
+        }
+    }
+
+    pub const fn set_mode(&mut self, mode: Mode) {
+        match mode {
+            Mode::Prot16 => {
+                self.limit_16_19_flags_0_3 &= !(Self::DB_0_1 | Self::LONG_0_1);
+            }
+            Mode::Prot32 => {
+                self.limit_16_19_flags_0_3 &= !Self::LONG_0_1;
+                self.limit_16_19_flags_0_3 |= Self::DB_0_1;
+            }
+            Mode::Long => {
+                assert!(self.is_code_segment());
+                self.limit_16_19_flags_0_3 &= !Self::DB_0_1;
+                self.limit_16_19_flags_0_3 |= Self::LONG_0_1;
+            }
+        }
+    }
+
+    pub const fn granularity(&self) -> Granularity {
+        if self.limit_16_19_flags_0_3 & Self::GRANULARITY_0_1 != 0 {
+            Granularity::Page
+        } else {
+            Granularity::Byte
+        }
+    }
+
+    pub const fn set_granularity(&mut self, granularity: Granularity) {
+        match granularity {
+            Granularity::Byte => self.limit_16_19_flags_0_3 &= !Self::GRANULARITY_0_1,
+            Granularity::Page => self.limit_16_19_flags_0_3 |= Self::GRANULARITY_0_1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct Memory {
+    limit_0_15: u16,
+    base_0_15: u16,
+    base_16_23: u8,
+    options: Options,
+    base_24_31: u8,
+}
+
+impl Memory {
     /// Constructs a zeroed memory segment, except for bits that must be set.
     pub const fn new() -> Self {
         Self {
             limit_0_15: 0,
             base_0_15: 0,
             base_16_23: 0,
-            access_0_7: Self::SYSTEM_0_1,
-            limit_16_19_flags_0_3: 0,
+            options: Options::memory(),
             base_24_31: 0,
         }
     }
@@ -136,8 +319,7 @@ impl Memory {
         self.limit_0_15 as u64
             | (self.base_0_15 as u64) << 16
             | (self.base_16_23 as u64) << 32
-            | (self.access_0_7 as u64) << 40
-            | (self.limit_16_19_flags_0_3 as u64) << 48
+            | (self.options.bits() as u64) << 40
             | (self.base_24_31 as u64) << 56
     }
 
@@ -148,8 +330,7 @@ impl Memory {
 
     /// Returns the limit of the memory segment.
     pub const fn limit(&self) -> u32 {
-        self.limit_0_15 as u32
-            | (self.limit_16_19_flags_0_3 as u32 & Self::LIMIT_16_19 as u32) << 16
+        self.limit_0_15 as u32 | (self.options.limit_16_19() as u32) << 16
     }
 
     /// Sets the limit of the memory segment.
@@ -161,11 +342,10 @@ impl Memory {
     pub const fn set_limit(&mut self, limit: u32) {
         assert!(limit <= 0xFFFFF);
         self.limit_0_15 = limit as u16;
-        self.limit_16_19_flags_0_3 &= !Self::LIMIT_16_19;
-        self.limit_16_19_flags_0_3 |= (limit >> 16) as u8;
+        self.options.set_limit_16_19((limit >> 16) as u8);
     }
 
-    /// Builds a new memory segment with `limit`.
+    /// Builds a memory segment with `limit`.
     ///
     /// # Panics
     ///
@@ -176,7 +356,7 @@ impl Memory {
         self
     }
 
-    /// Builds a new memory segment with the maximum limit.
+    /// Builds a memory segment with the maximum limit.
     pub const fn with_max_limit(self) -> Self {
         self.with_limit(0xFFFFF)
     }
@@ -201,17 +381,13 @@ impl Memory {
 
     /// Returns whether the CPU has accessed the descriptor.
     pub const fn was_accessed(&self) -> bool {
-        self.access_0_7 & Self::ACCESSED_0_1 != 0
+        self.options.was_accessed()
     }
 
     /// Sets whether the descriptor has been accessed. Note that
     /// this bypasses the CPU which usually sets the relevant bit.
     pub const fn set_accessed(&mut self, accessed: bool) {
-        if accessed {
-            self.access_0_7 |= Self::ACCESSED_0_1;
-        } else {
-            self.access_0_7 &= !Self::ACCESSED_0_1;
-        }
+        self.options.set_accessed(accessed);
     }
 
     /// Builds a memory segment with `accessed`.
@@ -222,16 +398,12 @@ impl Memory {
 
     /// Returns whether this code segment is readable. Aliases with writable for data segments.
     pub const fn readable(&self) -> bool {
-        self.access_0_7 & Self::READABLE_0_1 != 0
+        self.options.readable()
     }
 
     /// Sets whether the code segment is readable or not.
     pub const fn set_readable(&mut self, readable: bool) {
-        if readable {
-            self.access_0_7 |= Self::READABLE_0_1;
-        } else {
-            self.access_0_7 &= !Self::READABLE_0_1;
-        }
+        self.options.set_readable(readable);
     }
 
     /// Builds a memory segment with `readable`.
@@ -259,16 +431,12 @@ impl Memory {
     /// Returns whether the code segment is conforming. If conforming, this segment
     /// can be executed from an equal or lower privilege level. Aliases with `direction` for data segments.
     pub const fn conforming(&self) -> bool {
-        self.access_0_7 & Self::CONFORMING_0_1 != 0
+        self.options.conforming()
     }
 
     /// Sets whether the code segment is conforming or not.
     pub const fn set_conforming(&mut self, conforming: bool) {
-        if conforming {
-            self.access_0_7 |= Self::CONFORMING_0_1;
-        } else {
-            self.access_0_7 &= !Self::CONFORMING_0_1;
-        }
+        self.options.set_conforming(conforming);
     }
 
     /// Builds a memory segment with `conforming`.
@@ -301,12 +469,12 @@ impl Memory {
 
     /// Returns whether this memory segment is a code segment.
     pub const fn is_code_segment(&self) -> bool {
-        self.access_0_7 & Self::EXECUTABLE_0_1 != 0
+        self.options.is_code_segment()
     }
 
     /// Converts the memory segment into a code segment.
     pub const fn set_code_segment(&mut self) {
-        self.access_0_7 |= Self::EXECUTABLE_0_1;
+        self.options.set_code_segment();
     }
 
     /// Builds a code segment.
@@ -317,7 +485,7 @@ impl Memory {
 
     /// Returns whether this memory segment is a data segment.
     pub const fn is_data_segment(&self) -> bool {
-        self.access_0_7 & Self::EXECUTABLE_0_1 == 0
+        self.options.is_data_segment()
     }
 
     /// Converts the memory segment into a data segment.
@@ -327,14 +495,7 @@ impl Memory {
     /// Panics if the memory segment's mode is [`Mode::Long`].
     ///
     pub const fn set_data_segment(&mut self) {
-        match self.mode() {
-            Mode::Long => {
-                panic!();
-            }
-            _ => {}
-        }
-
-        self.access_0_7 &= !Self::EXECUTABLE_0_1;
+        self.options.set_data_segment();
     }
 
     /// Builds a data segment.
@@ -345,22 +506,12 @@ impl Memory {
 
     /// Returns the privilege level of the memory segment.
     pub const fn dpl(&self) -> Dpl {
-        let dpl = (self.access_0_7 & Self::DPL_0_2) >> Self::DPL_0_2_BIT;
-
-        match dpl {
-            0 => Dpl::Ring0,
-            1 => Dpl::Ring1,
-            2 => Dpl::Ring2,
-            3 => Dpl::Ring3,
-            _ => unreachable!(),
-        }
+        self.options.dpl()
     }
 
     /// Set the privilege level for this memory segment.
     pub const fn set_dpl(&mut self, dpl: Dpl) {
-        let dpl = dpl as u8;
-        self.access_0_7 &= !Self::DPL_0_2;
-        self.access_0_7 |= dpl << Self::DPL_0_2_BIT;
+        self.options.set_dpl(dpl);
     }
 
     /// Builds a memory segment with `dpl`.
@@ -372,16 +523,12 @@ impl Memory {
     /// Returns whether this descriptor is present. If not set,
     /// the descriptor is considered invalid by the CPU.
     pub const fn present(&self) -> bool {
-        self.access_0_7 & Self::PRESENT_0_1 != 0
+        self.options.present()
     }
 
     /// Sets whether the descriptor is present.
     pub const fn set_present(&mut self, present: bool) {
-        if present {
-            self.access_0_7 |= Self::PRESENT_0_1;
-        } else {
-            self.access_0_7 &= !Self::PRESENT_0_1;
-        }
+        self.options.set_present(present);
     }
 
     /// Builds a memory segment with `present`.
@@ -392,13 +539,7 @@ impl Memory {
 
     /// Returns the operating mode of this memory segment.
     pub const fn mode(&self) -> Mode {
-        if self.limit_16_19_flags_0_3 & Self::LONG_0_1 != 0 {
-            Mode::Long
-        } else if self.limit_16_19_flags_0_3 & Self::DB_0_1 != 0 {
-            Mode::Prot32
-        } else {
-            Mode::Prot16
-        }
+        self.options.mode()
     }
 
     /// Sets the operating mode of the memory segment.
@@ -408,20 +549,7 @@ impl Memory {
     /// Panics if mode is [`Mode::Long`] and this memory segment is not a code segment.
     ///
     pub const fn set_mode(&mut self, mode: Mode) {
-        match mode {
-            Mode::Prot16 => {
-                self.limit_16_19_flags_0_3 &= !(Self::DB_0_1 | Self::LONG_0_1);
-            }
-            Mode::Prot32 => {
-                self.limit_16_19_flags_0_3 &= !Self::LONG_0_1;
-                self.limit_16_19_flags_0_3 |= Self::DB_0_1;
-            }
-            Mode::Long => {
-                assert!(self.is_code_segment());
-                self.limit_16_19_flags_0_3 &= !Self::DB_0_1;
-                self.limit_16_19_flags_0_3 |= Self::LONG_0_1;
-            }
-        }
+        self.options.set_mode(mode);
     }
 
     /// Sets the operating mode of the memory segment.
@@ -439,24 +567,199 @@ impl Memory {
     /// the limit. For [`Granularity::Byte`], limit is scaled by 1. And for
     /// [`Granularity::Page`], limit is scaled by 4096.
     pub const fn granularity(&self) -> Granularity {
-        if self.limit_16_19_flags_0_3 & Self::GRANULARITY_0_1 != 0 {
-            Granularity::Page
-        } else {
-            Granularity::Byte
-        }
+        self.options.granularity()
     }
 
     /// Sets the granularity of the memory segment.
     pub const fn set_granularity(&mut self, granularity: Granularity) {
-        match granularity {
-            Granularity::Byte => self.limit_16_19_flags_0_3 &= !Self::GRANULARITY_0_1,
-            Granularity::Page => self.limit_16_19_flags_0_3 |= Self::GRANULARITY_0_1,
-        }
+        self.options.set_granularity(granularity);
     }
 
     /// Builds a memory segment with `granularity`.
     pub const fn with_granularity(mut self, granularity: Granularity) -> Self {
         self.set_granularity(granularity);
         self
+    }
+}
+
+impl From<Memory> for Descriptor {
+    fn from(memory: Memory) -> Self {
+        Descriptor::Memory(memory)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SystemType {
+    Ldt = 0x2,
+    Tss = 0x9,
+    TssBusy = 0xB,
+}
+
+pub struct System {
+    limit_0_15: u16,
+    base_0_15: u16,
+    base_16_23: u8,
+    options: Options,
+    base_24_31: u8,
+    base_32_63: u32,
+    _reserved: u32,
+}
+
+impl System {
+    /// Constructs a zeroed system segment.
+    pub const fn new(system_type: SystemType) -> Self {
+        Self {
+            limit_0_15: 0,
+            base_0_15: 0,
+            base_16_23: 0,
+            options: Options::system(system_type),
+            base_24_31: 0,
+            base_32_63: 0,
+            _reserved: 0,
+        }
+    }
+
+    /// Returns the raw bits of this descriptor.
+    pub const fn bits(&self) -> u128 {
+        self.limit_0_15 as u128
+            | (self.base_0_15 as u128) << 16
+            | (self.base_16_23 as u128) << 32
+            | (self.options.bits() as u128) << 40
+            | (self.base_24_31 as u128) << 56
+            | (self.base_32_63 as u128) << 64
+    }
+
+    /// Converts the descriptor into raw bits.
+    pub const fn into_bits(self) -> u128 {
+        self.bits()
+    }
+
+    /// Returns the limit of the memory segment.
+    pub const fn limit(&self) -> u32 {
+        self.limit_0_15 as u32 | (self.options.limit_16_19() as u32) << 16
+    }
+
+    /// Sets the limit of the system segment.
+    ///
+    /// # Panics
+    ///
+    /// If `limit` exceeds 0xFFFFF.
+    ///
+    pub const fn set_limit(&mut self, limit: u32) {
+        assert!(limit <= 0xFFFFF);
+        self.limit_0_15 = limit as u16;
+        self.options.set_limit_16_19((limit >> 16) as u8);
+    }
+
+    /// Builds a system segment with `limit`.
+    ///
+    /// # Panics
+    ///
+    /// If `limit` exceeds 0xFFFFF.
+    ///
+    pub const fn with_limit(mut self, limit: u32) -> Self {
+        self.set_limit(limit);
+        self
+    }
+
+    /// Builds a system segment with the maximum limit.
+    pub const fn with_max_limit(self) -> Self {
+        self.with_limit(0xFFFFF)
+    }
+
+    /// Returns the base of the system segment.
+    pub const fn base(&self) -> u64 {
+        self.base_0_15 as u64
+            | (self.base_16_23 as u64) << 16
+            | (self.base_24_31 as u64) << 24
+            | (self.base_32_63 as u64) << 32
+    }
+
+    /// Sets the base of the system segment.
+    pub const fn set_base(&mut self, base: u64) {
+        self.base_0_15 = base as u16;
+        self.base_16_23 = (base >> 16) as u8;
+        self.base_24_31 = (base >> 24) as u8;
+        self.base_32_63 = (base >> 32) as u32;
+    }
+
+    /// Builds a system segment with `base`.
+    pub const fn with_base(mut self, base: u64) -> Self {
+        self.set_base(base);
+        self
+    }
+
+    /// Returns the system segment type.
+    pub const fn system_type(&self) -> SystemType {
+        self.options.system_type()
+    }
+
+    /// Sets the system segment type.
+    pub const fn set_system_type(&mut self, system_type: SystemType) {
+        self.options.set_system_type(system_type);
+    }
+
+    // Builds a system segment with `system_type`.
+    pub const fn with_system_type(mut self, system_type: SystemType) -> Self {
+        self.set_system_type(system_type);
+        self
+    }
+
+    /// Returns the privilege level of the system segment.
+    pub const fn dpl(&self) -> Dpl {
+        self.options.dpl()
+    }
+
+    /// Set the privilege level for this system segment.
+    pub const fn set_dpl(&mut self, dpl: Dpl) {
+        self.options.set_dpl(dpl);
+    }
+
+    /// Builds a system segment with `dpl`.
+    pub const fn with_dpl(mut self, dpl: Dpl) -> Self {
+        self.set_dpl(dpl);
+        self
+    }
+
+    /// Returns whether this descriptor is present. If not set,
+    /// the descriptor is considered invalid by the CPU.
+    pub const fn present(&self) -> bool {
+        self.options.present()
+    }
+
+    /// Sets whether the descriptor is present.
+    pub const fn set_present(&mut self, present: bool) {
+        self.options.set_present(present);
+    }
+
+    /// Builds a system segment with `present`.
+    pub const fn with_present(mut self, present: bool) -> Self {
+        self.set_present(present);
+        self
+    }
+
+    /// Returns the granularity of the system segment. The granularity scales
+    /// the limit. For [`Granularity::Byte`], limit is scaled by 1. And for
+    /// [`Granularity::Page`], limit is scaled by 4096.
+    pub const fn granularity(&self) -> Granularity {
+        self.options.granularity()
+    }
+
+    /// Sets the granularity of the system segment.
+    pub const fn set_granularity(&mut self, granularity: Granularity) {
+        self.options.set_granularity(granularity);
+    }
+
+    /// Builds a system segment with `granularity`.
+    pub const fn with_granularity(mut self, granularity: Granularity) -> Self {
+        self.set_granularity(granularity);
+        self
+    }
+}
+
+impl From<System> for Descriptor {
+    fn from(system: System) -> Self {
+        Descriptor::System(system)
     }
 }
